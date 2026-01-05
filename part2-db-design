@@ -1,0 +1,185 @@
+Database Schema Design (SQL DDL)
+1.1 Companies
+CREATE TABLE companies (
+    id              BIGSERIAL PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+1.2 Warehouses
+CREATE TABLE warehouses (
+    id              BIGSERIAL PRIMARY KEY,
+    company_id      BIGINT NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    location        VARCHAR(255),
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_warehouse_company
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+Relationship
+•	One Company → Many Warehouses
+
+1.3 Products
+CREATE TABLE products (
+    id              BIGSERIAL PRIMARY KEY,
+    sku             VARCHAR(100) NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    product_type    VARCHAR(50) NOT NULL, -- 'simple', 'bundle'
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_product_sku UNIQUE (sku)
+);
+
+1.4 Inventory (Current State)
+CREATE TABLE inventory (
+    product_id      BIGINT NOT NULL,
+    warehouse_id    BIGINT NOT NULL,
+    quantity        INTEGER NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+   PRIMARY KEY (product_id, warehouse_id),
+
+   CONSTRAINT fk_inventory_product
+   FOREIGN KEY (product_id) REFERENCES products(id),
+
+    CONSTRAINT fk_inventory_warehouse
+    FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+
+    CONSTRAINT chk_inventory_quantity
+    CHECK (quantity >= 0)
+);
+Relationship
+•	Many Products ↔ Many Warehouses
+•	Stores current stock level
+
+1.5 Inventory Transactions (History / Audit Log)
+CREATE TABLE inventory_transactions (
+    id              BIGSERIAL PRIMARY KEY,
+    product_id      BIGINT NOT NULL,
+    warehouse_id    BIGINT NOT NULL,
+    quantity_change INTEGER NOT NULL,
+    reason          VARCHAR(100), -- purchase, sale, adjustment, transfer
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_tx_product
+    FOREIGN KEY (product_id) REFERENCES products(id),
+
+    CONSTRAINT fk_tx_warehouse
+    FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)
+);
+Purpose
+•	Tracks every inventory change
+•	Enables auditing, reconciliation, and analytics
+
+1.6 Suppliers
+CREATE TABLE suppliers (
+    id              BIGSERIAL PRIMARY KEY,
+    name            VARCHAR(255) NOT NULL,
+    contact_email   VARCHAR(255),
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+1.7 Supplier–Product Mapping
+CREATE TABLE supplier_products (
+    supplier_id     BIGINT NOT NULL,
+    product_id      BIGINT NOT NULL,
+    cost_price      DECIMAL(10, 2),
+
+    PRIMARY KEY (supplier_id, product_id),
+
+    CONSTRAINT fk_sp_supplier
+    FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+
+    CONSTRAINT fk_sp_product
+    FOREIGN KEY (product_id) REFERENCES products(id)
+);
+Relationship
+•	Many Suppliers ↔ Many Products
+1.8 Product Bundles (Self-Referencing)
+CREATE TABLE product_bundles (
+    bundle_id       BIGINT NOT NULL,
+    component_id    BIGINT NOT NULL,
+    quantity        INTEGER NOT NULL DEFAULT 1,
+
+    PRIMARY KEY (bundle_id, component_id),
+
+    CONSTRAINT fk_bundle_product
+    FOREIGN KEY (bundle_id) REFERENCES products(id),
+
+    CONSTRAINT fk_component_product
+    FOREIGN KEY (component_id) REFERENCES products(id),
+
+    CONSTRAINT chk_no_self_reference
+    CHECK (bundle_id <> component_id)
+);
+Purpose
+•	Allows bundles to contain multiple products
+•	Quantity defines how many units of each component
+
+2. Identified Gaps: 
+A. Warehouses and Stock
+1. Is it possible for inventory to be negative (backorders)?
+2. Are transfers between warehouses permitted? Are they supposed to be atomic?
+3. Is inventory better off being available or reserved?
+
+B. Goods
+1. Are SKUs exclusive to a corporation or to the entire world?
+2. Can a product be owned by more than one company?
+3. Are products measured in kilograms, pieces, or liters?
+
+C. Bundles
+1. Are bundles able to contain other bundles (nested bundles)?
+2. Can bundles be put together on demand or stored separately?
+3. How should the calculation of bundle inventory be done?
+
+D. Providers
+1. Is it possible for a supplier to provide the same product to several businesses?
+2. Do suppliers have minimum order quantities, lead times, or contracts?
+
+E. Compliance and Auditing
+1. Who changed the inventory (system/user)?
+2. Do we require gentle deletions?
+3. Is it necessary to track past prices?
+
+
+3. Design Decisions:
+A. Distinct Inventory Status from Transactions
+
+Why
+1. Fast readings (current stock) equals inventory.
+2. inventory_transactions = complete audit trail
+3. avoids costly real-time aggregation queries
+
+B. Primary Composite Keys
+
+Why
+1. (product_id, warehouse_id) guarantees:
+2. Each product has a single inventory record per warehouse.
+3. Natural uniqueness in the absence of surrogate IDs
+
+C. Bundle Table Explicit
+
+Why
+1. Steer clear of JSON fields for components
+2. Makes possible:
+i. Verification
+ii. Recursive inquiries
+iii. Rollups of inventory
+
+D. Foreign Constraints & Keys
+
+Why
+1. Maintain data integrity at the database level
+2. Find bugs before the application logic
+
+Indexing Strategy 
+CREATE INDEX idx_inventory_warehouse ON inventory(warehouse_id);
+CREATE INDEX idx_inventory_tx_product ON inventory_transactions(product_id);
+CREATE INDEX idx_inventory_tx_created ON inventory_transactions(created_at);
+Why
+•	Optimizes stock lookups
+•	Speeds up reporting and audits
