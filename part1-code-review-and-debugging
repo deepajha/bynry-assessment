@@ -1,0 +1,229 @@
+Issues Identified: 
+A. No Validation of Input
+
+IssueS
+1. Data['name'], data['sku'], etc. are all directly accessed by the code.
+2. assumes a request.JSON is present and well-structured.
+
+Effect on Production
+1. TypeError or KeyError will be raised by missing or corrupted JSON, resulting in 500 errors.
+2. Negative quantity and pricing are examples of bad data that can get into the database.
+3. Uncertain error replies are given to clients.
+
+B. No Transaction Safety or Error Handling
+
+Issue
+1. two distinct calls to commit().
+2. No rollback or try/except handling.
+
+Effect on Production
+1. If inventory creation is unsuccessful but product creation is successful:
+2. The product does not have inventory (inconsistent data).
+3. Errors in database integrity, such as duplicate SKUs, will cause the request to fail.
+4. Orphaned records become prevalent and challenging to reconcile.
+
+C. Violation of Business Logic: Assumption of Inventory Creation
+
+Issue
+1. automatically generates an inventory record for each new product.
+
+Presumptions:
+1. Each product has its own warehouse
+2.Inventory always begins at the moment of creation.
+
+Effect on Production
+1. Breaks if 
+A. The product is distributed globally and thereafter assigned to several warehouses.
+B. The initial amount ought to be either zero or optional.
+
+2. makes inventory processes in the future inflexible and prone to mistakes.
+
+D. No Check for SKU Uniqueness
+
+Issue
+1. Existing products with the same SKU are not checked.
+
+Effect on Production
+1. SKUs that are duplicates break:
+2. Order fulfillment
+3. Reporting
+4. Integrations (marketplaces, CRMs, and ERPs)
+5. The request will fail with 500 rather than a clear error if the database contains a unique constraint.
+
+E. Unverified Warehouse Existence
+
+Issue
+1. assumes the existence of warehouse_id.
+
+Effect on Production
+1. If there is no warehouse, there is a foreign key violation.
+2. If FK constraints are not implemented, there will be silent data corruption.
+
+F. Absence of authorization or authentication
+
+Issue
+1. Anyone can make products with Endpoint.
+
+Effect on Production
+1. Unauthorized production of goods
+2. Poisoning of data
+3. Failures in compliance and audits
+
+G. Absence of API Response Guidelines
+
+Issue
+1. HTTP 200 is always returned.
+2. Absence of structured responses or error messages
+
+Effect on Production
+1. Customers are unable to discern between success and failure.
+2. More difficult monitoring and debugging
+3. Unsatisfactory API user experience
+
+H. No Duplicate or Idempotency Protection
+
+Issue
+1. Duplicate products are produced when the same request is repeated.
+
+Effect on Production
+1. Duplicate records may be produced by network retries.
+2. Inflation of inventory
+
+2. Corrected Version Code:
+from flask import request, jsonify
+from sqlalchemy.exc import IntegrityError
+
+@app.route('/api/products', methods=['POST'])
+def create_product():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    required_fields = ['name', 'sku', 'price', 'warehouse_id', 'initial_quantity']
+    missing = [f for f in required_fields if f not in data]
+    if missing:
+        return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
+
+    if data['price'] < 0 or data['initial_quantity'] < 0:
+        return jsonify({"error": "Price and quantity must be non-negative"}), 400
+
+    # Validate warehouse
+    warehouse = Warehouse.query.get(data['warehouse_id'])
+    if not warehouse:
+        return jsonify({"error": "Invalid warehouse_id"}), 404
+
+    try:
+        # Check SKU uniqueness
+        existing = Product.query.filter_by(sku=data['sku']).first()
+        if existing:
+            return jsonify({"error": "SKU already exists"}), 409
+
+        product = Product(
+            name=data['name'],
+            sku=data['sku'],
+            price=data['price']
+        )
+
+        inventory = Inventory(
+            product=product,
+            warehouse_id=data['warehouse_id'],
+            quantity=data['initial_quantity']
+        )
+
+        db.session.add(product)
+        db.session.add(inventory)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Product created successfully",
+            "product_id": product.id
+        }), 201
+
+    except IntegrityError as e:
+        db.session.rollback()
+        return jsonify({"error": "Database integrity error"}), 400
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+3. Explanation of Fixes:
+1. JSON Validation
+Fix
+data = request.get_json()
+if not data:
+Why
+•	Prevents crashes when:
+Content-Type is incorrect
+Body is empty or malformed
+•	Avoids TypeError and KeyError
+
+2. Required Field Validation
+Fix
+missing_fields = [f for f in required_fields if f not in data]
+Why
+•	Ensures API contracts are respected
+•	Prevents runtime failures
+•	Gives clients actionable error messages
+
+3. Business Rule Enforcement
+Fix
+if data["price"] < 0:
+if data["initial_quantity"] < 0:
+Why
+•	Prevents invalid financial and inventory data
+•	Protects downstream reporting and analytics
+•	Aligns with real-world constraints
+
+4. Warehouse Validation
+Fix
+warehouse = Warehouse.query.get(data["warehouse_id"])
+Why
+•	Prevents foreign-key violations
+•	Avoids inventory tied to non-existent warehouses
+•	Eliminates silent data corruption
+
+
+5. SKU Uniqueness Check
+Fix
+existing_product = Product.query.filter_by(sku=data["sku"]).first()
+Why
+•	SKUs must be unique for:
+Order processing
+Integrations
+Inventory tracking
+•	Converts a DB crash into a clean 409 Conflict
+
+6. Atomic Database Transaction
+Fix
+db.session.add(product)
+db.session.add(inventory)
+db.session.commit()
+Why
+•	Guarantees all-or-nothing behavior
+•	Prevents:
+Products without inventory
+Inventory without products
+•	Critical for production data integrity
+
+7. Error Handling with Rollback
+Fix
+except IntegrityError:
+    db.session.rollback()
+Why
+•	Keeps the session usable after failures
+•	Prevents corrupted transactions
+•	Avoids cascading errors in subsequent requests
+
+8. Proper HTTP Status Codes
+Fix
+•	400 → Bad request
+•	404 → Resource not found
+•	409 → Conflict (duplicate SKU)
+•	201 → Resource created
+•	500 → Server error
+Why
+•	Makes the API predictable
+•	Improves frontend and integration behavior
+•	Enables monitoring and alerting
